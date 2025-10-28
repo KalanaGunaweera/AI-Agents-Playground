@@ -26,7 +26,7 @@ Contributions can include:
    git clone https://github.com/<your-username>/AI-Agents-Playground.git
    cd AI-Agents-Playground
 Create a new branch for your feature or fix
-
+```bash
 git checkout -b feature/my-new-agent
 
 Make your changes and test locally before committing.
