@@ -1,0 +1,84 @@
+{
+  "name": "AI Candidate Screening Agent",
+  "nodes": [
+    {
+      "id": "1",
+      "name": "New Application (IMAP Email Trigger)",
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 1,
+      "position": [200, 300],
+      "parameters": {
+        "mailbox": "INBOX",
+        "downloadAttachments": true
+      },
+      "credentials": {
+        "imap": {
+          "id": "your-imap-credential-id"
+        }
+      }
+    },
+    {
+      "id": "2",
+      "name": "Extract Resume Text (PDF)",
+      "type": "n8n-nodes-base.pdfExtract",
+      "typeVersion": 1,
+      "position": [450, 300],
+      "parameters": {
+        "binaryPropertyName": "attachment_0"
+      }
+    },
+    {
+      "id": "3",
+      "name": "Analyze Resume (OpenAI)",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 2,
+      "position": [700, 300],
+      "parameters": {
+        "model": "gpt-4o-mini",
+        "prompt": "You are an HR screening assistant. Analyze the following resume text and provide:\n1. Candidate name (if found)\n2. Key skills\n3. Experience summary\n4. Fit score (0–100) for a software engineering role.\n\nResume text:\n{{$json[\"data\"]}}"
+      },
+      "credentials": {
+        "openAIApi": {
+          "id": "your-openai-credential-id"
+        }
+      }
+    },
+    {
+      "id": "4",
+      "name": "Format Results",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [950, 300],
+      "parameters": {
+        "values": {
+          "string": [
+            { "name": "Candidate", "value": "={{$json[\"name\"]}}" },
+            { "name": "Score", "value": "={{$json[\"fit_score\"]}}" },
+            { "name": "Summary", "value": "={{$json[\"experience_summary\"]}}" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "5",
+      "name": "Send to HR (Slack)",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [1200, 300],
+      "parameters": {
+        "text": "New candidate scored: {{$json[\"Candidate\"]}} — {{$json[\"Score\"]}}/100\n\nSummary: {{$json[\"Summary\"]}}"
+      },
+      "credentials": {
+        "slackApi": {
+          "id": "your-slack-credential-id"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "1": { "main": [[{ "node": "2", "type": "main", "index": 0 }]] },
+    "2": { "main": [[{ "node": "3", "type": "main", "index": 0 }]] },
+    "3": { "main": [[{ "node": "4", "type": "main", "index": 0 }]] },
+    "4": { "main": [[{ "node": "5", "type": "main", "index": 0 }]] }
+  }
+}
