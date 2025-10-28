@@ -23,13 +23,17 @@ Contributions can include:
 1. **Fork** the repository  
 2. **Clone** your fork locally  
    ```bash
-   git clone https://github.com/<your-username>/ai-agents.git
-   cd ai-agents
+   git clone https://github.com/<your-username>/AI-Agents-Playground.git
+   cd AI-Agents-Playground
 Create a new branch for your feature or fix
 
 git checkout -b feature/my-new-agent
 
 Make your changes and test locally before committing.
+
+Add your agent to relevant folder
+
+Update agent-update.md with your new agent
 
 Commit and push your branch, then open a Pull Request to the main repo.
 
