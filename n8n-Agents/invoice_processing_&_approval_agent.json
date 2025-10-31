@@ -1,0 +1,275 @@
+{
+  "name": "Invoice Processing & Approval Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {
+          "mailbox": "INBOX",
+          "subject": "Invoice",
+          "from": "",
+          "readStatus": "unread"
+        },
+        "options": {
+          "attachments": true
+        }
+      },
+      "id": "email-trigger",
+      "name": "Email Trigger - New Invoice",
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2,
+      "position": [250, 400]
+    },
+    {
+      "parameters": {
+        "binaryPropertyName": "attachment_0",
+        "options": {}
+      },
+      "id": "extract-text",
+      "name": "Extract Text (OCR)",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [450, 400]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4",
+        "messages": {
+          "messageValues": [
+            {
+              "role": "system",
+              "message": "You are an invoice processing expert. Extract ALL key information from this invoice and return ONLY valid JSON (no markdown, no code blocks). Required format:\n{\n  \"invoiceNumber\": \"string\",\n  \"vendorName\": \"string\",\n  \"vendorAddress\": \"string\",\n  \"invoiceDate\": \"YYYY-MM-DD\",\n  \"dueDate\": \"YYYY-MM-DD\",\n  \"totalAmount\": number,\n  \"currency\": \"string\",\n  \"lineItems\": [{\"description\": \"string\", \"quantity\": number, \"unitPrice\": number, \"amount\": number}],\n  \"taxAmount\": number,\n  \"subtotal\": number,\n  \"paymentTerms\": \"string\",\n  \"purchaseOrder\": \"string or null\",\n  \"bankDetails\": {\"accountName\": \"string\", \"accountNumber\": \"string\", \"bankName\": \"string\"}\n}"
+            },
+            {
+              "role": "user",
+              "message": "Extract invoice data from:\n\n{{ $json.text }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "id": "ai-extract",
+      "name": "AI - Extract Invoice Data",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [650, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validation logic for invoice data\nconst invoice = $input.item.json;\nconst errors = [];\nconst warnings = [];\n\n// Required field checks\nif (!invoice.invoiceNumber) errors.push('Missing invoice number');\nif (!invoice.vendorName) errors.push('Missing vendor name');\nif (!invoice.totalAmount || invoice.totalAmount <= 0) errors.push('Invalid total amount');\nif (!invoice.invoiceDate) errors.push('Missing invoice date');\nif (!invoice.dueDate) errors.push('Missing due date');\n\n// Business logic validations\nconst invoiceDate = new Date(invoice.invoiceDate);\nconst dueDate = new Date(invoice.dueDate);\nconst today = new Date();\n\nif (dueDate < invoiceDate) {\n  errors.push('Due date is before invoice date');\n}\n\nif (invoiceDate > today) {\n  warnings.push('Invoice date is in the future');\n}\n\n// Amount validations\nif (invoice.lineItems && invoice.lineItems.length > 0) {\n  const calculatedSubtotal = invoice.lineItems.reduce((sum, item) => sum + (item.amount || 0), 0);\n  const expectedTotal = calculatedSubtotal + (invoice.taxAmount || 0);\n  \n  if (Math.abs(expectedTotal - invoice.totalAmount) > 0.01) {\n    warnings.push(`Amount mismatch: Calculated ${expectedTotal.toFixed(2)} vs Invoice ${invoice.totalAmount.toFixed(2)}`);\n  }\n}\n\n// Duplicate check (simplified - in production, check database)\nconst isDuplicate = false; // Would check DB here\n\nif (isDuplicate) {\n  errors.push('Duplicate invoice number detected');\n}\n\n// Determine if auto-approval is possible\nconst autoApprovalThreshold = 5000;\nconst requiresApproval = invoice.totalAmount > autoApprovalThreshold;\nconst daysUntilDue = Math.ceil((dueDate - today) / (1000 * 60 * 60 * 24));\nconst isUrgent = daysUntilDue <= 7;\n\nreturn {\n  json: {\n    ...invoice,\n    validation: {\n      isValid: errors.length === 0,\n      errors: errors,\n      warnings: warnings,\n      requiresApproval: requiresApproval,\n      isUrgent: isUrgent,\n      daysUntilDue: daysUntilDue\n    }\n  }\n};"
+      },
+      "id": "validate-invoice",
+      "name": "Validate Invoice Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.validation.isValid }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-valid",
+      "name": "Valid Invoice?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1050, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.validation.requiresApproval }}",
+              "value2": false
+            }
+          ]
+        }
+      },
+      "id": "check-approval",
+      "name": "Auto-Approve?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "invoices",
+        "columns": "invoice_number, vendor_name, vendor_address, invoice_date, due_date, total_amount, currency, subtotal, tax_amount, payment_terms, purchase_order, line_items, status, created_at",
+        "values": "={{ $json.invoiceNumber }}, {{ $json.vendorName }}, {{ $json.vendorAddress }}, {{ $json.invoiceDate }}, {{ $json.dueDate }}, {{ $json.totalAmount }}, {{ $json.currency }}, {{ $json.subtotal }}, {{ $json.taxAmount }}, {{ $json.paymentTerms }}, {{ $json.purchaseOrder }}, {{ JSON.stringify($json.lineItems) }}, auto_approved, {{ $now }}"
+      },
+      "id": "save-approved",
+      "name": "Save Invoice (Approved)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [1450, 200]
+    },
+    {
+      "parameters": {
+        "url": "https://api.quickbooks.com/v3/company/{{ $json.companyId }}/bill",
+        "authentication": "oAuth2",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "VendorRef",
+              "value": "={{ { value: $json.vendorId } }}"
+            },
+            {
+              "name": "TxnDate",
+              "value": "={{ $json.invoiceDate }}"
+            },
+            {
+              "name": "DueDate",
+              "value": "={{ $json.dueDate }}"
+            },
+            {
+              "name": "TotalAmt",
+              "value": "={{ $json.totalAmount }}"
+            },
+            {
+              "name": "Line",
+              "value": "={{ $json.lineItems.map(item => ({ DetailType: 'AccountBasedExpenseLineDetail', Amount: item.amount, Description: item.description })) }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "create-qb-bill",
+      "name": "Create QuickBooks Bill",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1650, 200]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "operation": "send",
+        "channelId": "C01234ABCD",
+        "text": "✅ *Invoice Auto-Processed*\n\n*Invoice #:* {{ $json.invoiceNumber }}\n*Vendor:* {{ $json.vendorName }}\n*Amount:* {{ $json.currency }} {{ $json.totalAmount.toFixed(2) }}\n*Due Date:* {{ $json.dueDate }}\n*Days Until Due:* {{ $json.validation.daysUntilDue }}\n\n{{ $json.validation.warnings.length > 0 ? '*Warnings:*\\n' + $json.validation.warnings.join('\\n• ') : '' }}\n\n*Status:* Auto-approved and added to QuickBooks"
+      },
+      "id": "notify-auto",
+      "name": "Notify Auto-Approval",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [1850, 200]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "invoices",
+        "columns": "invoice_number, vendor_name, vendor_address, invoice_date, due_date, total_amount, currency, subtotal, tax_amount, payment_terms, purchase_order, line_items, status, is_urgent, created_at",
+        "values": "={{ $json.invoiceNumber }}, {{ $json.vendorName }}, {{ $json.vendorAddress }}, {{ $json.invoiceDate }}, {{ $json.dueDate }}, {{ $json.totalAmount }}, {{ $json.currency }}, {{ $json.subtotal }}, {{ $json.taxAmount }}, {{ $json.paymentTerms }}, {{ $json.purchaseOrder }}, {{ JSON.stringify($json.lineItems) }}, pending_approval, {{ $json.validation.isUrgent }}, {{ $now }}"
+      },
+      "id": "save-pending",
+      "name": "Save Invoice (Pending)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [1450, 400]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "operation": "send",
+        "channelId": "C05678EFGH",
+        "text": "{{ $json.validation.isUrgent ? '🚨 *URGENT* ' : '⏳ ' }}*Invoice Requires Approval*\n\n*Invoice #:* {{ $json.invoiceNumber }}\n*Vendor:* {{ $json.vendorName }}\n*Amount:* {{ $json.currency }} {{ $json.totalAmount.toFixed(2) }}\n*Due Date:* {{ $json.dueDate }} ({{ $json.validation.daysUntilDue }} days)\n\n*Line Items:*\n{{ $json.lineItems.map(item => `• ${item.description}: ${item.quantity} x ${item.unitPrice} = ${item.amount}`).join('\\n') }}\n\n{{ $json.validation.warnings.length > 0 ? '*Warnings:*\\n' + $json.validation.warnings.join('\\n• ') + '\\n\\n' : '' }}*PO Number:* {{ $json.purchaseOrder || 'None' }}\n\n*Action Required:* Please review and approve in finance system"
+      },
+      "id": "request-approval",
+      "name": "Request Approval",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [1650, 400]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "invoice_errors",
+        "columns": "vendor_name, invoice_number, error_details, raw_text, email_from, received_at",
+        "values": "={{ $('AI - Extract Invoice Data').item.json.vendorName || 'Unknown' }}, {{ $('AI - Extract Invoice Data').item.json.invoiceNumber || 'Unknown' }}, {{ JSON.stringify($json.validation.errors) }}, {{ $('Extract Text (OCR)').item.json.text }}, {{ $('Email Trigger - New Invoice').item.json.from }}, {{ $now }}"
+      },
+      "id": "log-error",
+      "name": "Log Error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [1450, 600]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "operation": "send",
+        "channelId": "C09876WXYZ",
+        "text": "❌ *Invoice Processing Failed*\n\n*Vendor:* {{ $('AI - Extract Invoice Data').item.json.vendorName || 'Unknown' }}\n*Invoice #:* {{ $('AI - Extract Invoice Data').item.json.invoiceNumber || 'Unknown' }}\n*From:* {{ $('Email Trigger - New Invoice').item.json.from }}\n\n*Errors:*\n{{ $json.validation.errors.join('\\n• ') }}\n\n*Action Required:* Manual review needed"
+      },
+      "id": "alert-error",
+      "name": "Alert Error",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [1650, 600]
+    }
+  ],
+  "connections": {
+    "Email Trigger - New Invoice": {
+      "main": [[{ "node": "Extract Text (OCR)", "type": "main", "index": 0 }]]
+    },
+    "Extract Text (OCR)": {
+      "main": [[{ "node": "AI - Extract Invoice Data", "type": "main", "index": 0 }]]
+    },
+    "AI - Extract Invoice Data": {
+      "main": [[{ "node": "Validate Invoice Data", "type": "main", "index": 0 }]]
+    },
+    "Validate Invoice Data": {
+      "main": [[{ "node": "Valid Invoice?", "type": "main", "index": 0 }]]
+    },
+    "Valid Invoice?": {
+      "main": [
+        [{ "node": "Auto-Approve?", "type": "main", "index": 0 }],
+        [{ "node": "Log Error", "type": "main", "index": 0 }]
+      ]
+    },
+    "Auto-Approve?": {
+      "main": [
+        [{ "node": "Save Invoice (Approved)", "type": "main", "index": 0 }],
+        [{ "node": "Save Invoice (Pending)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Save Invoice (Approved)": {
+      "main": [[{ "node": "Create QuickBooks Bill", "type": "main", "index": 0 }]]
+    },
+    "Create QuickBooks Bill": {
+      "main": [[{ "node": "Notify Auto-Approval", "type": "main", "index": 0 }]]
+    },
+    "Save Invoice (Pending)": {
+      "main": [[{ "node": "Request Approval", "type": "main", "index": 0 }]]
+    },
+    "Log Error": {
+      "main": [[{ "node": "Alert Error", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
