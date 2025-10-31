@@ -1,0 +1,367 @@
+{
+  "name": "Sales Email Outreach & Follow-up Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule - Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM leads WHERE status = 'new' OR (status = 'contacted' AND last_contact_date < NOW() - INTERVAL '3 days' AND follow_up_count < 3) OR (status = 'warm' AND last_contact_date < NOW() - INTERVAL '7 days') ORDER BY lead_score DESC LIMIT 20"
+      },
+      "id": "get-leads",
+      "name": "Get Leads Needing Contact",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [450, 400]
+    },
+    {
+      "parameters": {
+        "url": "https://api.linkedin.com/v2/people/{{ $json.linkedin_id }}",
+        "authentication": "oAuth2",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "enrich-linkedin",
+      "name": "Enrich LinkedIn Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [650, 400],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "https://api.hunter.io/v2/domain-search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "queryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "domain",
+              "value": "={{ $('Get Leads Needing Contact').item.json.company_domain }}"
+            },
+            {
+              "name": "limit",
+              "value": "5"
+            }
+          ]
+        }
+      },
+      "id": "find-emails",
+      "name": "Find Company Contacts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [850, 400],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "model": "gpt-4",
+        "messages": {
+          "messageValues": [
+            {
+              "role": "system",
+              "message": "You are a sales outreach expert. Create a personalized, compelling email for this lead. The email should:\n1. Reference something specific about their company or role\n2. Address a likely pain point they face\n3. Clearly state the value proposition\n4. Include a soft CTA (call to action)\n5. Be concise (under 150 words)\n6. Sound natural and conversational, not salesy\n\nReturn JSON with: subject, body, tone (professional/casual/friendly), personalizationNotes"
+            },
+            {
+              "role": "user",
+              "message": "Lead Information:\nName: {{ $('Get Leads Needing Contact').item.json.name }}\nCompany: {{ $('Get Leads Needing Contact').item.json.company }}\nJob Title: {{ $('Get Leads Needing Contact').item.json.job_title }}\nIndustry: {{ $('Get Leads Needing Contact').item.json.industry }}\nCompany Size: {{ $('Get Leads Needing Contact').item.json.company_size }}\nLead Score: {{ $('Get Leads Needing Contact').item.json.lead_score }}\n\nContact Stage: {{ $('Get Leads Needing Contact').item.json.status }}\nFollow-up Count: {{ $('Get Leads Needing Contact').item.json.follow_up_count || 0 }}\n\nRecent Activity:\n{{ $('Get Leads Needing Contact').item.json.recent_activity }}\n\nLinkedIn Data:\n{{ $json.headline }}\n{{ $json.summary }}\n\nCompany Info:\n{{ $('Find Company Contacts').item.json.organization }}\n\nOur Product: [YOUR PRODUCT DESCRIPTION]\nKey Benefits: [YOUR KEY BENEFITS]"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.7
+        }
+      },
+      "id": "ai-generate-email",
+      "name": "AI - Generate Personalized Email",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [1050, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Analyze email content and calculate send score\nconst email = $input.item.json;\nconst lead = $('Get Leads Needing Contact').item.json;\n\n// Quality checks\nlet qualityScore = 100;\nconst issues = [];\n\n// Check personalization\nif (!email.body.includes(lead.name.split(' ')[0])) {\n  qualityScore -= 20;\n  issues.push('Missing first name personalization');\n}\n\nif (!email.body.includes(lead.company)) {\n  qualityScore -= 15;\n  issues.push('Missing company name');\n}\n\n// Check length\nconst wordCount = email.body.split(/\\s+/).length;\nif (wordCount < 50 || wordCount > 200) {\n  qualityScore -= 10;\n  issues.push(`Word count ${wordCount} outside optimal range (50-200)`);\n}\n\n// Check for spam words\nconst spamWords = ['free', 'guarantee', 'amazing', 'incredible', 'limited time'];\nconst lowerBody = email.body.toLowerCase();\nspamWords.forEach(word => {\n  if (lowerBody.includes(word)) {\n    qualityScore -= 5;\n    issues.push(`Contains potential spam word: ${word}`);\n  }\n});\n\n// Check CTA presence\nif (!lowerBody.includes('?') && !lowerBody.includes('call') && !lowerBody.includes('meeting')) {\n  qualityScore -= 10;\n  issues.push('No clear call to action');\n}\n\n// Timing optimization\nconst hour = new Date().getHours();\nlet sendDelay = 0;\n\n// Best sending times: 10am-12pm or 2pm-4pm\nif (hour < 10) {\n  sendDelay = (10 - hour) * 60; // minutes\n} else if (hour > 16) {\n  sendDelay = (24 - hour + 10) * 60; // next day at 10am\n}\n\nreturn {\n  json: {\n    ...email,\n    leadId: lead.id,\n    leadName: lead.name,\n    leadEmail: lead.email,\n    leadCompany: lead.company,\n    qualityScore: qualityScore,\n    qualityIssues: issues,\n    shouldSend: qualityScore >= 70,\n    sendDelay: sendDelay,\n    optimalSendTime: sendDelay > 0 ? new Date(Date.now() + sendDelay * 60000).toISOString() : 'now'\n  }\n};"
+      },
+      "id": "quality-check",
+      "name": "Quality Check & Timing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.qualityScore }}",
+              "operation": "largerEqual",
+              "value2": 70
+            }
+          ]
+        }
+      },
+      "id": "check-quality",
+      "name": "Quality Pass?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1450, 400]
+    },
+    {
+      "parameters": {
+        "amount": "={{ $json.sendDelay }}",
+        "unit": "minutes"
+      },
+      "id": "wait-optimal",
+      "name": "Wait for Optimal Time",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "sales@yourcompany.com",
+        "toEmail": "={{ $json.leadEmail }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "html",
+        "html": "<p>Hi {{ $json.leadName.split(' ')[0] }},</p>\n\n{{ $json.body.split('\\n').map(p => `<p>${p}</p>`).join('') }}\n\n<p>Best regards,<br>{{ $json.senderName }}<br>{{ $json.senderTitle }}<br>{{ $json.senderCompany }}</p>\n\n<!-- Tracking pixel -->\n<img src=\"https://yourtracking.com/pixel?lead_id={{ $json.leadId }}&email_id={{ $runIndex }}\" width=\"1\" height=\"1\" />"
+      },
+      "id": "send-email",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [1850, 300]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "updateKey": "id",
+        "columnToMatchOn": "={{ $json.leadId }}",
+        "columns": "status, last_contact_date, follow_up_count, last_email_subject, last_email_body, last_email_quality_score",
+        "values": "contacted, {{ $now }}, {{ $('Get Leads Needing Contact').item.json.follow_up_count + 1 }}, {{ $json.subject }}, {{ $json.body }}, {{ $json.qualityScore }}"
+      },
+      "id": "update-lead",
+      "name": "Update Lead Record",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [2050, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "contact",
+        "operation": "update",
+        "contactId": "={{ $('Get Leads Needing Contact').item.json.crm_contact_id }}",
+        "additionalFields": {
+          "lastContactDate": "={{ $now }}",
+          "lifecycleStage": "lead",
+          "customProperties": {
+            "property": [
+              {
+                "name": "last_outreach_type",
+                "value": "automated_email"
+              },
+              {
+                "name": "email_quality_score",
+                "value": "={{ $json.qualityScore }}"
+              },
+              {
+                "name": "outreach_count",
+                "value": "={{ $('Get Leads Needing Contact').item.json.follow_up_count + 1 }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "sync-crm",
+      "name": "Sync to CRM",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 1,
+      "position": [2250, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "operation": "send",
+        "channelId": "C01234SALES",
+        "text": "📧 *Outreach Email Sent*\n\n*Lead:* {{ $json.leadName }} ({{ $json.leadCompany }})\n*Subject:* {{ $json.subject }}\n*Quality Score:* {{ $json.qualityScore }}/100\n*Follow-up #:* {{ $('Get Leads Needing Contact').item.json.follow_up_count + 1 }}\n\n*Personalization:*\n{{ $json.personalizationNotes }}\n\n*Next Action:* Monitor for response in 3 days"
+      },
+      "id": "notify-team",
+      "name": "Notify Sales Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [2450, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "email_quality_issues",
+        "columns": "lead_id, quality_score, issues, email_subject, email_body, created_at",
+        "values": "={{ $json.leadId }}, {{ $json.qualityScore }}, {{ JSON.stringify($json.qualityIssues) }}, {{ $json.subject }}, {{ $json.body }}, {{ $now }}"
+      },
+      "id": "log-issue",
+      "name": "Log Quality Issue",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [1650, 500]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "operation": "send",
+        "channelId": "C05678SALES",
+        "text": "⚠️ *Email Quality Issue*\n\n*Lead:* {{ $json.leadName }} ({{ $json.leadCompany }})\n*Quality Score:* {{ $json.qualityScore }}/100\n\n*Issues:*\n{{ $json.qualityIssues.join('\\n• ') }}\n\n*Email Subject:* {{ $json.subject }}\n\n*Action:* Email not sent. Manual review recommended."
+      },
+      "id": "alert-quality",
+      "name": "Alert Quality Issue",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [1850, 500]
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {
+          "mailbox": "INBOX",
+          "subject": "",
+          "from": "",
+          "readStatus": "unread"
+        }
+      },
+      "id": "email-response",
+      "name": "Monitor Email Responses",
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2,
+      "position": [250, 800]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4",
+        "messages": {
+          "messageValues": [
+            {
+              "role": "system",
+              "message": "Analyze this email response from a lead. Determine: 1) Sentiment (positive/neutral/negative), 2) Intent (interested/not_interested/needs_info/meeting_request), 3) Urgency (high/medium/low), 4) Key points mentioned, 5) Suggested next action. Return JSON."
+            },
+            {
+              "role": "user",
+              "message": "From: {{ $json.from }}\nSubject: {{ $json.subject }}\n\n{{ $json.text }}"
+            }
+          ]
+        }
+      },
+      "id": "analyze-response",
+      "name": "AI - Analyze Response",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [450, 800]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE leads SET status = CASE WHEN '{{ $json.intent }}' = 'interested' THEN 'hot' WHEN '{{ $json.intent }}' = 'meeting_request' THEN 'meeting_scheduled' ELSE status END, response_sentiment = '{{ $json.sentiment }}', last_response_date = NOW() WHERE email = '{{ $('Monitor Email Responses').item.json.from }}' RETURNING *"
+      },
+      "id": "update-response",
+      "name": "Update Lead Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [650, 800]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "operation": "send",
+        "channelId": "C01234SALES",
+        "text": "{{ $('AI - Analyze Response').item.json.sentiment === 'positive' ? '🎉' : $('AI - Analyze Response').item.json.sentiment === 'negative' ? '😔' : '💬' }} *Lead Response Received*\n\n*From:* {{ $('Monitor Email Responses').item.json.from }}\n*Sentiment:* {{ $('AI - Analyze Response').item.json.sentiment }}\n*Intent:* {{ $('AI - Analyze Response').item.json.intent }}\n*Urgency:* {{ $('AI - Analyze Response').item.json.urgency }}\n\n*Key Points:*\n{{ $('AI - Analyze Response').item.json.keyPoints.join('\\n• ') }}\n\n*Suggested Action:* {{ $('AI - Analyze Response').item.json.suggestedAction }}\n\n*Quick Actions:* <Reply> | <Schedule Meeting> | <Mark Not Interested>"
+      },
+      "id": "notify-response",
+      "name": "Notify Sales Rep",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [850, 800]
+    }
+  ],
+  "connections": {
+    "Schedule - Every 6 Hours": {
+      "main": [[{ "node": "Get Leads Needing Contact", "type": "main", "index": 0 }]]
+    },
+    "Get Leads Needing Contact": {
+      "main": [[{ "node": "Enrich LinkedIn Data", "type": "main", "index": 0 }]]
+    },
+    "Enrich LinkedIn Data": {
+      "main": [[{ "node": "Find Company Contacts", "type": "main", "index": 0 }]]
+    },
+    "Find Company Contacts": {
+      "main": [[{ "node": "AI - Generate Personalized Email", "type": "main", "index": 0 }]]
+    },
+    "AI - Generate Personalized Email": {
+      "main": [[{ "node": "Quality Check & Timing", "type": "main", "index": 0 }]]
+    },
+    "Quality Check & Timing": {
+      "main": [[{ "node": "Quality Pass?", "type": "main", "index": 0 }]]
+    },
+    "Quality Pass?": {
+      "main": [
+        [{ "node": "Wait for Optimal Time", "type": "main", "index": 0 }],
+        [{ "node": "Log Quality Issue", "type": "main", "index": 0 }]
+      ]
+    },
+    "Wait for Optimal Time": {
+      "main": [[{ "node": "Send Email", "type": "main", "index": 0 }]]
+    },
+    "Send Email": {
+      "main": [[{ "node": "Update Lead Record", "type": "main", "index": 0 }]]
+    },
+    "Update Lead Record": {
+      "main": [[{ "node": "Sync to CRM", "type": "main", "index": 0 }]]
+    },
+    "Sync to CRM": {
+      "main": [[{ "node": "Notify Sales Team", "type": "main", "index": 0 }]]
+    },
+    "Log Quality Issue": {
+      "main": [[{ "node": "Alert Quality Issue", "type": "main", "index": 0 }]]
+    },
+    "Monitor Email Responses": {
+      "main": [[{ "node": "AI - Analyze Response", "type": "main", "index": 0 }]]
+    },
+    "AI - Analyze Response": {
+      "main": [[{ "node": "Update Lead Status", "type": "main", "index": 0 }]]
+    },
+    "Update Lead Status": {
+      "main": [[{ "node": "Notify Sales Rep", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
