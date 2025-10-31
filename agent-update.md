@@ -1,5 +1,6 @@
 ## n8n-agents
 1.smart-candidate-screening agent.json
+2.customer_support_AI_agent.json
 
 ## crew-AI-agents
 1.AI_business_research_crew.py
