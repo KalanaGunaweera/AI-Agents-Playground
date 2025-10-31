@@ -1,0 +1,159 @@
+{
+  "name": "Customer Support AI Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "support-ticket",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - New Support Ticket",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4",
+        "messages": {
+          "messageValues": [
+            {
+              "role": "system",
+              "message": "You are a customer support agent. Analyze the support ticket and: 1) Categorize the issue (Technical, Billing, General Inquiry, Feature Request), 2) Assess urgency (Low, Medium, High, Critical), 3) Provide a suggested response, 4) Recommend if human escalation is needed. Return JSON with: category, urgency, suggestedResponse, needsEscalation (boolean), and reasoning."
+            },
+            {
+              "role": "user",
+              "message": "Customer: {{ $json.customerName }}\nEmail: {{ $json.email }}\n\nIssue:\n{{ $json.message }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.3
+        }
+      },
+      "id": "ai-analysis",
+      "name": "AI - Analyze Ticket",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.needsEscalation }}",
+              "operation": "equals",
+              "value2": "true"
+            }
+          ]
+        }
+      },
+      "id": "check-escalation",
+      "name": "Needs Human?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "ticket",
+        "operation": "create",
+        "subject": "URGENT: {{ $('Webhook - New Support Ticket').item.json.subject }}",
+        "description": "Customer: {{ $('Webhook - New Support Ticket').item.json.customerName }}\nEmail: {{ $('Webhook - New Support Ticket').item.json.email }}\n\nOriginal Message:\n{{ $('Webhook - New Support Ticket').item.json.message }}\n\n---\nAI Analysis:\nCategory: {{ $json.category }}\nUrgency: {{ $json.urgency }}\nReasoning: {{ $json.reasoning }}",
+        "priority": "high",
+        "assigneeId": "={{ $json.assigneeId }}",
+        "tags": "ai-escalated,{{ $json.category }}"
+      },
+      "id": "create-zendesk",
+      "name": "Create Zendesk Ticket",
+      "type": "n8n-nodes-base.zendesk",
+      "typeVersion": 1,
+      "position": [850, 200]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "operation": "send",
+        "channelId": "={{ $json.slackChannelId }}",
+        "text": "🚨 High-Priority Support Ticket Escalated\n\n*Customer:* {{ $('Webhook - New Support Ticket').item.json.customerName }}\n*Category:* {{ $json.category }}\n*Urgency:* {{ $json.urgency }}\n\n*Issue:* {{ $('Webhook - New Support Ticket').item.json.message }}\n\n*Zendesk Ticket:* {{ $('Create Zendesk Ticket').item.json.ticketUrl }}"
+      },
+      "id": "notify-slack",
+      "name": "Notify Team on Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [1050, 200]
+    },
+    {
+      "parameters": {
+        "fromEmail": "support@yourcompany.com",
+        "toEmail": "={{ $('Webhook - New Support Ticket').item.json.email }}",
+        "subject": "Re: {{ $('Webhook - New Support Ticket').item.json.subject }}",
+        "emailFormat": "html",
+        "html": "<p>Hi {{ $('Webhook - New Support Ticket').item.json.customerName }},</p>\n\n<p>{{ $json.suggestedResponse }}</p>\n\n<p>This is an automated response. If you need further assistance, our team will follow up shortly.</p>\n\n<p>Best regards,<br>Customer Support Team</p>"
+      },
+      "id": "send-email",
+      "name": "Send Auto-Response",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [850, 400]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "support_tickets",
+        "columns": "customer_name, email, category, urgency, message, ai_response, escalated, created_at",
+        "values": "={{ $('Webhook - New Support Ticket').item.json.customerName }}, {{ $('Webhook - New Support Ticket').item.json.email }}, {{ $json.category }}, {{ $json.urgency }}, {{ $('Webhook - New Support Ticket').item.json.message }}, {{ $json.suggestedResponse }}, {{ $json.needsEscalation }}, {{ $now }}"
+      },
+      "id": "log-database",
+      "name": "Log to Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [1050, 400]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: true, ticketId: $json.id, category: $json.category, urgency: $json.urgency, message: 'Thank you for contacting us. We have received your request.' } }}"
+      },
+      "id": "response",
+      "name": "Send Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - New Support Ticket": {
+      "main": [[{ "node": "AI - Analyze Ticket", "type": "main", "index": 0 }]]
+    },
+    "AI - Analyze Ticket": {
+      "main": [[{ "node": "Needs Human?", "type": "main", "index": 0 }]]
+    },
+    "Needs Human?": {
+      "main": [
+        [{ "node": "Create Zendesk Ticket", "type": "main", "index": 0 }],
+        [{ "node": "Send Auto-Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Zendesk Ticket": {
+      "main": [[{ "node": "Notify Team on Slack", "type": "main", "index": 0 }]]
+    },
+    "Notify Team on Slack": {
+      "main": [[{ "node": "Send Response", "type": "main", "index": 0 }]]
+    },
+    "Send Auto-Response": {
+      "main": [[{ "node": "Log to Database", "type": "main", "index": 0 }]]
+    },
+    "Log to Database": {
+      "main": [[{ "node": "Send Response", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
