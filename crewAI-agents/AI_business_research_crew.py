@@ -56,7 +56,15 @@ crew = Crew(
 
 # === Run the Crew ===
 if __name__ == "__main__":
-    company = input("Enter a company or industry: ")
-    result = crew.kickoff(inputs={"company_name": company})
-    print("\n=== Business Research Report ===\n")
-    print(result)
+    try:
+    company = input("Enter a company or industry: ").strip()
+    if not company:
+        print("Error: Please enter a valid company or industry name.")
+    else:
+        print(f"\nStarting business research for: {company}...\n")
+        result = crew.kickoff(inputs={"company_name": company})
+        print("\n=== Business Research Report ===\n")
+        print(result)
+
+except Exception as e:
+    print(f"\nAn error occurred while running the research: {e}\n")
