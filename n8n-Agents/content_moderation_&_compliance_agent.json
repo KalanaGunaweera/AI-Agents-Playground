@@ -1,0 +1,225 @@
+{
+  "name": "Content Moderation & Compliance Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "moderate-content",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-content",
+      "name": "Webhook - New Content",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 400]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/moderations",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "input",
+              "value": "={{ $json.content }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "openai-moderate",
+      "name": "OpenAI Moderation API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [450, 400]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4",
+        "messages": {
+          "messageValues": [
+            {
+              "role": "system",
+              "message": "You are a content compliance expert. Analyze this content for: 1) Brand safety concerns, 2) Legal/regulatory issues (GDPR, COPPA, advertising laws), 3) Tone and professionalism, 4) Factual accuracy claims that need verification, 5) Cultural sensitivity. Return JSON with: complianceScore (0-100), issues (array of {type, severity, description}), recommendations (array), approved (boolean), reasoning."
+            },
+            {
+              "role": "user",
+              "message": "Content Type: {{ $('Webhook - New Content').item.json.contentType }}\nAuthor: {{ $('Webhook - New Content').item.json.author }}\nTarget Audience: {{ $('Webhook - New Content').item.json.audience }}\n\nContent:\n{{ $('Webhook - New Content').item.json.content }}\n\nOpenAI Moderation Results:\nCategories: {{ JSON.stringify($json.results[0].categories) }}\nFlagged: {{ $json.results[0].flagged }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "id": "ai-compliance",
+      "name": "AI - Compliance Check",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [650, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract any URLs, emails, phone numbers from content\nconst content = $input.item.json.content;\nconst urls = content.match(/https?:\\/\\/[^\\s]+/g) || [];\nconst emails = content.match(/[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\\.[a-zA-Z0-9._-]+/g) || [];\nconst phones = content.match(/\\+?\\d[\\d\\s-]{8,}/g) || [];\n\nreturn {\n  json: {\n    urls: urls,\n    emails: emails,\n    phones: phones,\n    hasPII: emails.length > 0 || phones.length > 0,\n    hasExternalLinks: urls.length > 0,\n    wordCount: content.split(/\\s+/).length,\n    readabilityScore: calculateReadability(content)\n  }\n};\n\nfunction calculateReadability(text) {\n  const words = text.split(/\\s+/).length;\n  const sentences = text.split(/[.!?]+/).length;\n  const avgWordsPerSentence = words / sentences;\n  \n  // Simplified readability score\n  if (avgWordsPerSentence < 15) return 'Easy';\n  if (avgWordsPerSentence < 20) return 'Medium';\n  return 'Complex';\n}"
+      },
+      "id": "extract-metadata",
+      "name": "Extract Metadata",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $('AI - Compliance Check').item.json.approved }}",
+              "value2": true
+            },
+            {
+              "value1": "={{ $('OpenAI Moderation API').item.json.results[0].flagged }}",
+              "operation": "notEqual",
+              "value2": true
+            }
+          ]
+        },
+        "combineOperation": "all"
+      },
+      "id": "check-approval",
+      "name": "Content Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1050, 400]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "table": "content_submissions",
+        "updateKey": "id",
+        "columnToMatchOn": "={{ $('Webhook - New Content').item.json.contentId }}",
+        "columns": "status, compliance_score, moderation_flags, issues, approved_at",
+        "values": "approved, {{ $('AI - Compliance Check').item.json.complianceScore }}, {{ JSON.stringify($('OpenAI Moderation API').item.json.results[0].categories) }}, {{ JSON.stringify($('AI - Compliance Check').item.json.issues) }}, {{ $now }}"
+      },
+      "id": "approve-db",
+      "name": "Approve in Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "operation": "send",
+        "channelId": "C01234ABCD",
+        "text": "✅ *Content Auto-Approved*\n\n*Type:* {{ $('Webhook - New Content').item.json.contentType }}\n*Author:* {{ $('Webhook - New Content').item.json.author }}\n*Compliance Score:* {{ $('AI - Compliance Check').item.json.complianceScore }}/100\n\n*Metadata:*\n• Word Count: {{ $('Extract Metadata').item.json.wordCount }}\n• Readability: {{ $('Extract Metadata').item.json.readabilityScore }}\n• External Links: {{ $('Extract Metadata').item.json.urls.length }}\n\n*View Content:* {{ $('Webhook - New Content').item.json.contentUrl }}"
+      },
+      "id": "notify-approved",
+      "name": "Notify Approval",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "table": "content_submissions",
+        "updateKey": "id",
+        "columnToMatchOn": "={{ $('Webhook - New Content').item.json.contentId }}",
+        "columns": "status, compliance_score, moderation_flags, issues, flagged_at",
+        "values": "flagged, {{ $('AI - Compliance Check').item.json.complianceScore }}, {{ JSON.stringify($('OpenAI Moderation API').item.json.results[0].categories) }}, {{ JSON.stringify($('AI - Compliance Check').item.json.issues) }}, {{ $now }}"
+      },
+      "id": "flag-db",
+      "name": "Flag in Database",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [1250, 500]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "operation": "send",
+        "channelId": "C05678EFGH",
+        "text": "⚠️ *Content Flagged for Review*\n\n*Type:* {{ $('Webhook - New Content').item.json.contentType }}\n*Author:* {{ $('Webhook - New Content').item.json.author }}\n*Compliance Score:* {{ $('AI - Compliance Check').item.json.complianceScore }}/100\n\n*Issues Found:*\n{{ $('AI - Compliance Check').item.json.issues.map(i => `• [${i.severity}] ${i.type}: ${i.description}`).join('\\n') }}\n\n*Recommendations:*\n{{ $('AI - Compliance Check').item.json.recommendations.join('\\n• ') }}\n\n*PII Detected:* {{ $('Extract Metadata').item.json.hasPII ? 'Yes ⚠️' : 'No' }}\n\n*Review Content:* {{ $('Webhook - New Content').item.json.contentUrl }}"
+      },
+      "id": "notify-flagged",
+      "name": "Request Human Review",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [1450, 500]
+    },
+    {
+      "parameters": {
+        "fromEmail": "compliance@yourcompany.com",
+        "toEmail": "={{ $('Webhook - New Content').item.json.authorEmail }}",
+        "subject": "Content Submission Requires Revision",
+        "emailFormat": "html",
+        "html": "<p>Hi {{ $('Webhook - New Content').item.json.author }},</p>\n\n<p>Thank you for your content submission. Our automated compliance check has identified some issues that need to be addressed before publication:</p>\n\n<ul>\n{{ $('AI - Compliance Check').item.json.issues.map(i => `<li><strong>${i.type}</strong> (${i.severity}): ${i.description}</li>`).join('') }}\n</ul>\n\n<p><strong>Recommendations:</strong></p>\n<ul>\n{{ $('AI - Compliance Check').item.json.recommendations.map(r => `<li>${r}</li>`).join('') }}\n</ul>\n\n<p>Please revise your content and resubmit. If you have questions, contact the compliance team.</p>\n\n<p>Best regards,<br>Content Compliance Team</p>"
+      },
+      "id": "email-author",
+      "name": "Email Author",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [1650, 500]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: true, approved: $('AI - Compliance Check').item.json.approved, complianceScore: $('AI - Compliance Check').item.json.complianceScore, issues: $('AI - Compliance Check').item.json.issues.length, message: $('AI - Compliance Check').item.json.approved ? 'Content approved' : 'Content flagged for review' } }}"
+      },
+      "id": "response",
+      "name": "Send Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1850, 400]
+    }
+  ],
+  "connections": {
+    "Webhook - New Content": {
+      "main": [[{ "node": "OpenAI Moderation API", "type": "main", "index": 0 }]]
+    },
+    "OpenAI Moderation API": {
+      "main": [[{ "node": "AI - Compliance Check", "type": "main", "index": 0 }]]
+    },
+    "AI - Compliance Check": {
+      "main": [[{ "node": "Extract Metadata", "type": "main", "index": 0 }]]
+    },
+    "Extract Metadata": {
+      "main": [[{ "node": "Content Approved?", "type": "main", "index": 0 }]]
+    },
+    "Content Approved?": {
+      "main": [
+        [{ "node": "Approve in Database", "type": "main", "index": 0 }],
+        [{ "node": "Flag in Database", "type": "main", "index": 0 }]
+      ]
+    },
+    "Approve in Database": {
+      "main": [[{ "node": "Notify Approval", "type": "main", "index": 0 }]]
+    },
+    "Notify Approval": {
+      "main": [[{ "node": "Send Response", "type": "main", "index": 0 }]]
+    },
+    "Flag in Database": {
+      "main": [[{ "node": "Request Human Review", "type": "main", "index": 0 }]]
+    },
+    "Request Human Review": {
+      "main": [[{ "node": "Email Author", "type": "main", "index": 0 }]]
+    },
+    "Email Author": {
+      "main": [[{ "node": "Send Response", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
