@@ -1,0 +1,241 @@
+{
+  "name": "Lead Qualification & Enrichment Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "new-lead",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-lead",
+      "name": "Webhook - New Lead",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.clearbit.com/v2/companies/find",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "domain",
+              "value": "={{ $json.email.split('@')[1] }}"
+            }
+          ]
+        }
+      },
+      "id": "enrich-clearbit",
+      "name": "Enrich with Clearbit",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [450, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "https://api.hunter.io/v2/email-verifier",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "queryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "email",
+              "value": "={{ $('Webhook - New Lead').item.json.email }}"
+            }
+          ]
+        }
+      },
+      "id": "verify-email",
+      "name": "Verify Email (Hunter.io)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [650, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "model": "gpt-4",
+        "messages": {
+          "messageValues": [
+            {
+              "role": "system",
+              "message": "You are a lead qualification expert. Based on the provided data, score this lead from 0-100 and categorize as: Hot (80-100), Warm (50-79), Cold (0-49). Consider: company size, industry, job title, email validity, website quality, funding status. Return JSON with: score, category, reasoning, recommendedAction, keyInsights (array)."
+            },
+            {
+              "role": "user",
+              "message": "Lead Data:\nName: {{ $('Webhook - New Lead').item.json.name }}\nEmail: {{ $('Webhook - New Lead').item.json.email }}\nCompany: {{ $('Webhook - New Lead').item.json.company }}\nJob Title: {{ $('Webhook - New Lead').item.json.jobTitle }}\nMessage: {{ $('Webhook - New Lead').item.json.message }}\n\nEnrichment Data:\nCompany Size: {{ $json.employees }}\nIndustry: {{ $json.industry }}\nFunding: {{ $json.raised }}\nTech Stack: {{ $json.tech }}\n\nEmail Valid: {{ $('Verify Email (Hunter.io)').item.json.data.result }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "id": "ai-qualify",
+      "name": "AI - Qualify Lead",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.score }}",
+              "operation": "largerEqual",
+              "value2": 80
+            }
+          ]
+        }
+      },
+      "id": "check-score",
+      "name": "Hot Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "contact",
+        "operation": "create",
+        "email": "={{ $('Webhook - New Lead').item.json.email }}",
+        "additionalFields": {
+          "firstName": "={{ $('Webhook - New Lead').item.json.name.split(' ')[0] }}",
+          "lastName": "={{ $('Webhook - New Lead').item.json.name.split(' ')[1] }}",
+          "company": "={{ $('Webhook - New Lead').item.json.company }}",
+          "jobTitle": "={{ $('Webhook - New Lead').item.json.jobTitle }}",
+          "leadStatus": "HOT",
+          "leadScore": "={{ $('AI - Qualify Lead').item.json.score }}",
+          "customProperties": {
+            "property": [
+              {
+                "name": "lead_category",
+                "value": "={{ $('AI - Qualify Lead').item.json.category }}"
+              },
+              {
+                "name": "ai_insights",
+                "value": "={{ $('AI - Qualify Lead').item.json.keyInsights.join(', ') }}"
+              },
+              {
+                "name": "company_size",
+                "value": "={{ $('Enrich with Clearbit').item.json.employees }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "add-hubspot-hot",
+      "name": "Add to HubSpot (Hot)",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 1,
+      "position": [1250, 200]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "operation": "send",
+        "channelId": "={{ $json.salesChannelId }}",
+        "text": "🔥 *HOT LEAD ALERT!*\n\n*Name:* {{ $('Webhook - New Lead').item.json.name }}\n*Company:* {{ $('Webhook - New Lead').item.json.company }} ({{ $('Enrich with Clearbit').item.json.employees }} employees)\n*Job Title:* {{ $('Webhook - New Lead').item.json.jobTitle }}\n*Score:* {{ $('AI - Qualify Lead').item.json.score }}/100\n\n*AI Insights:*\n{{ $('AI - Qualify Lead').item.json.keyInsights.join('\n• ') }}\n\n*Recommended Action:* {{ $('AI - Qualify Lead').item.json.recommendedAction }}\n\n*HubSpot:* {{ $json.contactUrl }}"
+      },
+      "id": "notify-sales",
+      "name": "Alert Sales Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [1450, 200]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "contact",
+        "operation": "create",
+        "email": "={{ $('Webhook - New Lead').item.json.email }}",
+        "additionalFields": {
+          "firstName": "={{ $('Webhook - New Lead').item.json.name.split(' ')[0] }}",
+          "lastName": "={{ $('Webhook - New Lead').item.json.name.split(' ')[1] }}",
+          "company": "={{ $('Webhook - New Lead').item.json.company }}",
+          "jobTitle": "={{ $('Webhook - New Lead').item.json.jobTitle }}",
+          "leadStatus": "={{ $('AI - Qualify Lead').item.json.category }}",
+          "leadScore": "={{ $('AI - Qualify Lead').item.json.score }}"
+        }
+      },
+      "id": "add-hubspot-other",
+      "name": "Add to HubSpot (Nurture)",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 1,
+      "position": [1250, 400]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "operation": "send",
+        "listId": "={{ $json.nurtureListId }}",
+        "fromEmail": "marketing@yourcompany.com",
+        "toEmail": "={{ $('Webhook - New Lead').item.json.email }}",
+        "subject": "Thanks for your interest!",
+        "emailFormat": "html",
+        "html": "<p>Hi {{ $('Webhook - New Lead').item.json.name.split(' ')[0] }},</p>\n\n<p>Thank you for reaching out! We'd love to learn more about how we can help {{ $('Webhook - New Lead').item.json.company }}.</p>\n\n<p>Based on your role as {{ $('Webhook - New Lead').item.json.jobTitle }}, here are some resources you might find valuable...</p>"
+      },
+      "id": "add-nurture",
+      "name": "Add to Nurture Campaign",
+      "type": "n8n-nodes-base.mailchimp",
+      "typeVersion": 1,
+      "position": [1450, 400]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: true, leadScore: $('AI - Qualify Lead').item.json.score, category: $('AI - Qualify Lead').item.json.category, message: 'Lead processed successfully' } }}"
+      },
+      "id": "response",
+      "name": "Send Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - New Lead": {
+      "main": [[{ "node": "Enrich with Clearbit", "type": "main", "index": 0 }]]
+    },
+    "Enrich with Clearbit": {
+      "main": [[{ "node": "Verify Email (Hunter.io)", "type": "main", "index": 0 }]]
+    },
+    "Verify Email (Hunter.io)": {
+      "main": [[{ "node": "AI - Qualify Lead", "type": "main", "index": 0 }]]
+    },
+    "AI - Qualify Lead": {
+      "main": [[{ "node": "Hot Lead?", "type": "main", "index": 0 }]]
+    },
+    "Hot Lead?": {
+      "main": [
+        [{ "node": "Add to HubSpot (Hot)", "type": "main", "index": 0 }],
+        [{ "node": "Add to HubSpot (Nurture)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Add to HubSpot (Hot)": {
+      "main": [[{ "node": "Alert Sales Team", "type": "main", "index": 0 }]]
+    },
+    "Alert Sales Team": {
+      "main": [[{ "node": "Send Response", "type": "main", "index": 0 }]]
+    },
+    "Add to HubSpot (Nurture)": {
+      "main": [[{ "node": "Add to Nurture Campaign", "type": "main", "index": 0 }]]
+    },
+    "Add to Nurture Campaign": {
+      "main": [[{ "node": "Send Response", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
